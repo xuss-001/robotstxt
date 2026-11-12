@@ -14,3 +14,14 @@ _test
 bench-*.txt
 coverage.txt
 robots.txt-check/robots.txt-check
+
+# Local credentials and generated environment data
+.env
+.env.*
+!.env.example
+auth.json
+key.txt
+*.pem
+*.key
+*token*.txt
+*credentials*.json
