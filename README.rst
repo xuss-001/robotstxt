@@ -44,6 +44,35 @@ functions `FromBytes(body []byte) (*RobotsData, error)` or same for `string`::
 As of 2012-10-03, `FromBytes` is the most efficient method, everything else
 is a wrapper for this core function.
 
+To opt into RFC 9309 style parsing/matching while leaving existing callers on
+the historical interpretation, use `ParseOptions`::
+
+    robots, err := robotstxt.FromBytesWithOptions(
+        body,
+        robotstxt.ParseOptions{RFC9309: true},
+    )
+    // or the string variant
+    robots, err = robotstxt.FromStringWithOptions(
+        "User-agent: *\nDisallow: /",
+        robotstxt.ParseOptions{RFC9309: true},
+    )
+
+`ParseOptions{RFC9309: false}` (the zero value) is identical to `FromBytes`/
+`FromString`, including the historical `ParseError` behaviour. Each returned
+`RobotsData` stores its own mode: there is no global switch, so objects parsed
+in either mode can be used concurrently in the same process. In RFC 9309
+mode, agent selection is a case-insensitive full product-token match (no
+prefix matching), same-name groups are merged, a dedicated group shadows the
+`*` group, an empty dedicated group is retained and `/robots.txt` is always
+allowed. Matching keeps the query string, supports `*`/`$` and percent-encoding
+equivalence with reserved-character isolation (e.g. `%2F` never matches a raw
+`/`). Malformed local lines are skipped instead of producing `ParseError`.
+
+An offline, runnable comparison program lives in
+`examples/rfc9309-demo` and prints allow/deny results for both modes::
+
+    go run ./examples/rfc9309-demo
+
 There are few convenient constructors for various purposes:
 
 * `FromResponse(*http.Response) (*RobotsData, error)` to init robots data

@@ -24,7 +24,21 @@ type RobotsData struct {
 	// private
 	allowAll    bool
 	disallowAll bool
+	rfc9309     bool
 	groups      map[string]*Group
+}
+
+// ParseOptions controls parsing behaviour of FromBytesWithOptions and
+// FromStringWithOptions. The zero value preserves the historical
+// interpretation used by FromBytes/FromString.
+//
+// When RFC9309 is true, the robots.txt body is parsed and matched according
+// to the rules implemented for RFC 9309 (see package-level documentation
+// in rfc9309.go). Each parsed RobotsData stores its own mode, so old and
+// new objects can be used concurrently in the same process; there is no
+// global switch.
+type ParseOptions struct {
+	RFC9309 bool
 }
 
 type Group struct {
@@ -33,6 +47,8 @@ type Group struct {
 	CrawlDelay time.Duration
 
 	disallowAll bool
+	rfc9309     bool
+	rfcRules    []*rfcRule
 }
 
 type rule struct {
@@ -143,6 +159,24 @@ func FromString(body string) (r *RobotsData, err error) {
 	return FromBytes([]byte(body))
 }
 
+// FromBytesWithOptions parses robots.txt body with explicit parsing options.
+// ParseOptions{RFC9309: false} (the zero value) is fully equivalent to
+// FromBytes and keeps the historical behaviour, including ParseError.
+// ParseOptions{RFC9309: true} enables the RFC 9309 style parsing and
+// matching implemented in this package; malformed local lines are skipped
+// instead of producing ParseError.
+func FromBytesWithOptions(body []byte, opts ParseOptions) (r *RobotsData, err error) {
+	if opts.RFC9309 {
+		return parseRFC9309(body)
+	}
+	return FromBytes(body)
+}
+
+// FromStringWithOptions is the string counterpart of FromBytesWithOptions.
+func FromStringWithOptions(body string, opts ParseOptions) (r *RobotsData, err error) {
+	return FromBytesWithOptions([]byte(body), opts)
+}
+
 func (r *RobotsData) TestAgent(path, agent string) bool {
 	if r.allowAll {
 		return true
@@ -166,6 +200,21 @@ func (r *RobotsData) TestAgent(path, agent string) bool {
 // records are ignored by the crawler. The user-agent is non-case-sensitive.
 // The order of the groups within the robots.txt file is irrelevant.
 func (r *RobotsData) FindGroup(agent string) (ret *Group) {
+	if r.rfc9309 {
+		// RFC 9309: case-insensitive full product-token match, no prefix
+		// matching. A specific group never merges with the "*" group.
+		if g := r.groups[strings.ToLower(agent)]; g != nil {
+			return g
+		}
+		if g := r.groups["*"]; g != nil {
+			return g
+		}
+		if r.disallowAll {
+			return emptyDisallowGroup
+		}
+		return emptyGroup
+	}
+
 	var prefixLen int
 
 	agent = strings.ToLower(agent)
@@ -196,6 +245,9 @@ func (g *Group) Test(path string) bool {
 	if g.disallowAll {
 		return false
 	}
+	if g.rfc9309 {
+		return g.testRFC9309(path)
+	}
 	if r := g.findRule(path); r != nil {
 		return r.allow
 	}
@@ -203,6 +255,26 @@ func (g *Group) Test(path string) bool {
 	// From Google's spec:
 	// By default, there are no restrictions for crawling for the designated crawlers.
 	return true
+}
+
+func (g *Group) testRFC9309(path string) bool {
+	// RFC 9309: requests to /robots.txt itself are always allowed.
+	if path == "/robots.txt" {
+		return true
+	}
+
+	var best *rfcRule
+	for _, rl := range g.rfcRules {
+		if rl.match(path) && (best == nil || rl.effectiveLen > best.effectiveLen ||
+			(rl.effectiveLen == best.effectiveLen && rl.allow)) {
+			best = rl
+		}
+	}
+	if best == nil {
+		// No rule matched: allow by default.
+		return true
+	}
+	return best.allow
 }
 
 // From Google's spec:
